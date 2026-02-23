@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { motion } from "framer-motion";
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -6,14 +7,15 @@ import {
   BarElement,
   PointElement,
   LineElement,
-  ArcElement, // <-- required for Pie chart
+  ArcElement,
   Title,
   Tooltip,
   Legend,
+  Filler,
 } from "chart.js";
 import { Line, Bar, Pie } from "react-chartjs-2";
+import "./App.css";
 
-// Register all required chart components
 ChartJS.register(
   CategoryScale,
   LinearScale,
@@ -24,7 +26,41 @@ ChartJS.register(
   Title,
   Tooltip,
   Legend,
+  Filler,
 );
+
+/* Theme-aligned chart defaults */
+const chartColors = {
+  primary: "rgba(99, 102, 241, 0.9)",
+  primaryFill: "rgba(99, 102, 241, 0.15)",
+  success: "rgba(34, 197, 94, 0.9)",
+  warning: "rgba(245, 158, 11, 0.9)",
+  pink: "rgba(236, 72, 153, 0.9)",
+  cyan: "rgba(6, 182, 212, 0.9)",
+};
+
+const chartDefaults = {
+  responsive: true,
+  maintainAspectRatio: false,
+  plugins: {
+    legend: {
+      labels: {
+        color: "rgba(161, 161, 170, 0.9)",
+        font: { family: "'Plus Jakarta Sans', sans-serif", size: 11 },
+      },
+    },
+  },
+  scales: {
+    x: {
+      grid: { color: "rgba(255,255,255,0.04)" },
+      ticks: { color: "rgba(161, 161, 170, 0.7)", maxTicksLimit: 8 },
+    },
+    y: {
+      grid: { color: "rgba(255,255,255,0.04)" },
+      ticks: { color: "rgba(161, 161, 170, 0.7)" },
+    },
+  },
+};
 
 interface RequestMetrics {
   path: string;
@@ -51,8 +87,43 @@ interface Summary {
   error_count: number;
 }
 
+interface IpStatsResponse {
+  blocked_ips: string[];
+  requests_by_ip: { ip: string; count: number }[];
+}
+
+const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:10000";
+
+function formatBytes(n: number): string {
+  if (n >= 1e9) return (n / 1e9).toFixed(2) + " GB";
+  if (n >= 1e6) return (n / 1e6).toFixed(2) + " MB";
+  if (n >= 1e3) return (n / 1e3).toFixed(2) + " KB";
+  return n + " B";
+}
+
+function latencyClass(ms: number): string {
+  if (ms <= 10) return "status-ok";
+  if (ms <= 50) return "status-warn";
+  return "status-err";
+}
+
+const container = {
+  hidden: { opacity: 0 },
+  show: {
+    opacity: 1,
+    transition: { staggerChildren: 0.04, delayChildren: 0.1 },
+  },
+};
+
+const item = {
+  hidden: { opacity: 0, y: 8 },
+  show: { opacity: 1, y: 0 },
+};
+
 function App() {
   const [requests, setRequests] = useState<RequestMetrics[]>([]);
+  const [ipStats, setIpStats] = useState<IpStatsResponse | null>(null);
+  const [ipStatsError, setIpStatsError] = useState<string | null>(null);
   const [summary, setSummary] = useState<Summary>({
     total_requests: 0,
     total_bytes: 0,
@@ -82,7 +153,6 @@ function App() {
         const avgLatency =
           (prev.avg_latency_ms * prev.total_requests + data.latency_ms) /
           totalRequests;
-
         const minLatency = Math.min(
           prev.min_latency_ms || data.latency_ms,
           data.latency_ms,
@@ -108,19 +178,44 @@ function App() {
     };
 
     ws.onclose = () => console.log("WebSocket closed");
-
     return () => ws.close();
   }, []);
 
-  // Prepare chart data
+  // Poll IP stats (blocked list + requests by IP)
+  useEffect(() => {
+    const fetchIpStats = async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/ip-stats`);
+        if (res.ok) {
+          const data: IpStatsResponse = await res.json();
+          setIpStats(data);
+          setIpStatsError(null);
+        } else {
+          setIpStats({ blocked_ips: [], requests_by_ip: [] });
+          setIpStatsError(`Backend returned ${res.status}`);
+        }
+      } catch (e) {
+        setIpStats({ blocked_ips: [], requests_by_ip: [] });
+        setIpStatsError("Backend unreachable (check URL and CORS)");
+      }
+    };
+    fetchIpStats();
+    const interval = setInterval(fetchIpStats, 5000);
+    return () => clearInterval(interval);
+  }, []);
+
   const latencyData = {
     labels: requests.map((_, i) => i.toString()),
     datasets: [
       {
         label: "Latency (ms)",
         data: requests.map((r) => r.latency_ms),
-        borderColor: "rgb(75, 192, 192)",
-        backgroundColor: "rgba(75, 192, 192, 0.5)",
+        borderColor: chartColors.primary,
+        backgroundColor: chartColors.primaryFill,
+        fill: true,
+        tension: 0.35,
+        pointRadius: 0,
+        pointHoverRadius: 4,
       },
     ],
   };
@@ -134,9 +229,15 @@ function App() {
     labels: Object.keys(requestsPerEndpoint),
     datasets: [
       {
-        label: "Requests per endpoint",
+        label: "Requests",
         data: Object.values(requestsPerEndpoint),
-        backgroundColor: "rgba(255, 99, 132, 0.5)",
+        backgroundColor: [
+          chartColors.primary,
+          chartColors.success,
+          chartColors.warning,
+          chartColors.pink,
+          chartColors.cyan,
+        ],
       },
     ],
   };
@@ -145,120 +246,273 @@ function App() {
     labels: ["Cache Hits", "Cache Misses"],
     datasets: [
       {
-        label: "Cache",
         data: [summary.cache_hits, summary.cache_misses],
-        backgroundColor: ["rgba(54, 162, 235, 0.5)", "rgba(255, 206, 86, 0.5)"],
+        backgroundColor: [chartColors.success, chartColors.warning],
+        borderWidth: 0,
       },
     ],
   };
 
+  const kpis = [
+    { label: "Total Requests", value: summary.total_requests.toLocaleString() },
+    { label: "Total Bytes", value: formatBytes(summary.total_bytes) },
+    { label: "Avg Latency", value: `${summary.avg_latency_ms.toFixed(2)} ms` },
+    { label: "Min Latency", value: `${summary.min_latency_ms} ms` },
+    { label: "Max Latency", value: `${summary.max_latency_ms} ms` },
+    { label: "Req/s", value: (summary.rps * 30).toFixed(2) },
+    { label: "Cache Hits", value: summary.cache_hits.toLocaleString() },
+    { label: "Cache Misses", value: summary.cache_misses.toLocaleString() },
+    { label: "Errors", value: summary.error_count.toLocaleString() },
+  ];
+
   return (
-    <div style={{ padding: "2rem", fontFamily: "Arial, sans-serif" }}>
-      <h1>Rust Server Dashboard</h1>
-
-      <div style={{ display: "flex", gap: "2rem", marginBottom: "1rem" }}>
-        <div>Total Requests: {summary.total_requests}</div>
-        <div>Total Bytes: {summary.total_bytes}</div>
-        <div>Avg Latency: {summary.avg_latency_ms.toFixed(2)} ms</div>
-        <div>Min Latency: {summary.min_latency_ms} ms</div>
-        <div>Max Latency: {summary.max_latency_ms} ms</div>
-        <div>Requests/sec: {(summary.rps * 30).toFixed(2)}</div>
-        <div>Cache Hits: {summary.cache_hits}</div>
-        <div>Cache Misses: {summary.cache_misses}</div>
-        <div>Error Count: {summary.error_count}</div>
+    <motion.div
+      className="dashboard"
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      transition={{ duration: 0.4 }}
+    >
+      <div className="dashboard-header">
+        <h1 className="dashboard-title">
+          Rust Server
+          <span className="live-badge">
+            <span className="live-dot" />
+            Live
+          </span>
+        </h1>
       </div>
 
-      <h2>Charts</h2>
-      <div style={{ display: "flex", gap: "2rem" }}>
-        <div style={{ width: "400px" }}>
-          <Line data={latencyData} redraw />
-        </div>
-        <div style={{ width: "400px" }}>
-          <Bar data={endpointData} redraw />
-        </div>aaa3
-        <div style={{ width: "400px" }}>
-          <Pie data={cacheData} redraw />
-        </div>
-      </div>
-
-      <h2>Recent Requests (last 50)</h2>
-      <table
-        style={{
-          borderCollapse: "collapse",
-          width: "100%",
-          marginTop: "0.5rem",
-        }}
+      <motion.div
+        className="kpi-grid"
+        variants={container}
+        initial="hidden"
+        animate="show"
       >
-        <thead>
-          <tr>
-            <th style={{ border: "1px solid #ccc", padding: "0.5rem" }}>
-              Path
-            </th>
-            <th style={{ border: "1px solid #ccc", padding: "0.5rem" }}>
-              Latency (ms)
-            </th>
-            <th style={{ border: "1px solid #ccc", padding: "0.5rem" }}>
-              Bytes
-            </th>
-            <th style={{ border: "1px solid #ccc", padding: "0.5rem" }}>
-              Status
-            </th>
-            <th style={{ border: "1px solid #ccc", padding: "0.5rem" }}>
-              Method
-            </th>
-            <th style={{ border: "1px solid #ccc", padding: "0.5rem" }}>RPS</th>
-            <th style={{ border: "1px solid #ccc", padding: "0.5rem" }}>
-              CPU %
-            </th>
-            <th style={{ border: "1px solid #ccc", padding: "0.5rem" }}>
-              Memory
-            </th>
-            <th style={{ border: "1px solid #ccc", padding: "0.5rem" }}>
-              Active Conns
-            </th>
-            <th style={{ border: "1px solid #ccc", padding: "0.5rem" }}>
-              Uptime (s)
-            </th>
-          </tr>
-        </thead>
-        <tbody>
-          {requests.map((r, idx) => (
-            <tr key={idx}>
-              <td style={{ border: "1px solid #ccc", padding: "0.5rem" }}>
-                {r.path}
-              </td>
-              <td style={{ border: "1px solid #ccc", padding: "0.5rem" }}>
-                {r.latency_ms}
-              </td>
-              <td style={{ border: "1px solid #ccc", padding: "0.5rem" }}>
-                {r.bytes}
-              </td>
-              <td style={{ border: "1px solid #ccc", padding: "0.5rem" }}>
-                {r.status_code}
-              </td>
-              <td style={{ border: "1px solid #ccc", padding: "0.5rem" }}>
-                {r.method}
-              </td>
-              <td style={{ border: "1px solid #ccc", padding: "0.5rem" }}>
-                {r.request_rate.toFixed(2)}
-              </td>
-              <td style={{ border: "1px solid #ccc", padding: "0.5rem" }}>
-                {r.cpu_usage_percent.toFixed(2)}
-              </td>
-              <td style={{ border: "1px solid #ccc", padding: "0.5rem" }}>
-                {r.memory_usage_bytes}
-              </td>
-              <td style={{ border: "1px solid #ccc", padding: "0.5rem" }}>
-                {r.active_connections}
-              </td>
-              <td style={{ border: "1px solid #ccc", padding: "0.5rem" }}>
-                {r.uptime_seconds}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+        {kpis.map((k) => (
+          <motion.div
+            key={k.label}
+            className="kpi-card"
+            variants={item}
+            transition={{ type: "spring", stiffness: 400, damping: 25 }}
+          >
+            <div className="kpi-label">{k.label}</div>
+            <div className="kpi-value mono">{k.value}</div>
+          </motion.div>
+        ))}
+      </motion.div>
+
+      <section className="section">
+        <h2 className="section-title">Charts</h2>
+        <div className="charts-grid">
+          <motion.div
+            className="chart-card"
+            initial={{ opacity: 0, y: 16 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.15, duration: 0.35 }}
+          >
+            <h3>Latency (ms)</h3>
+            <div style={{ height: 220 }}>
+              <Line
+                data={latencyData}
+                options={{ ...chartDefaults }}
+                redraw
+              />
+            </div>
+          </motion.div>
+          <motion.div
+            className="chart-card"
+            initial={{ opacity: 0, y: 16 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.2, duration: 0.35 }}
+          >
+            <h3>Requests per endpoint</h3>
+            <div style={{ height: 220 }}>
+              <Bar
+                data={endpointData}
+                options={{
+                  ...chartDefaults,
+                  plugins: {
+                    ...chartDefaults.plugins,
+                    legend: { display: false },
+                  },
+                }}
+                redraw
+              />
+            </div>
+          </motion.div>
+          <motion.div
+            className="chart-card"
+            initial={{ opacity: 0, y: 16 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.25, duration: 0.35 }}
+          >
+            <h3>Cache</h3>
+            <div style={{ height: 220 }}>
+              <Pie
+                data={cacheData}
+                options={{
+                  responsive: true,
+                  maintainAspectRatio: false,
+                  plugins: {
+                    legend: {
+                      position: "bottom",
+                      labels: {
+                        color: "rgba(161, 161, 170, 0.9)",
+                        font: { family: "'Plus Jakarta Sans', sans-serif", size: 11 },
+                      },
+                    },
+                  },
+                }}
+                redraw
+              />
+            </div>
+          </motion.div>
+        </div>
+      </section>
+
+      <section className="section">
+        <h2 className="section-title">Blocked IPs & requests by IP</h2>
+        {ipStatsError && (
+          <p className="ip-stats-error" style={{ margin: 0, fontSize: "0.8125rem", color: "var(--warning)" }}>
+            {ipStatsError}
+          </p>
+        )}
+        <div className="ip-stats-grid">
+          <motion.div
+            className="table-wrap table-wrap-small"
+            initial={{ opacity: 0, y: 16 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.28, duration: 0.35 }}
+          >
+            <h3 className="table-subtitle">Blocked IPs</h3>
+            <table>
+              <thead>
+                <tr>
+                  <th>IP address</th>
+                </tr>
+              </thead>
+              <tbody>
+                {!ipStats ? (
+                  <tr>
+                    <td className="empty-state">Loading…</td>
+                  </tr>
+                ) : ipStats.blocked_ips.length === 0 ? (
+                  <tr>
+                    <td className="empty-state">No blocked IPs</td>
+                  </tr>
+                ) : (
+                  ipStats.blocked_ips.map((ip) => (
+                    <tr key={ip}>
+                      <td className="mono status-err">{ip}</td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </motion.div>
+          <motion.div
+            className="table-wrap table-wrap-flex"
+            initial={{ opacity: 0, y: 16 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.32, duration: 0.35 }}
+          >
+            <h3 className="table-subtitle">Requests by IP</h3>
+            <table>
+              <thead>
+                <tr>
+                  <th>IP address</th>
+                  <th>Requests</th>
+                </tr>
+              </thead>
+              <tbody>
+                {!ipStats ? (
+                  <tr>
+                    <td colSpan={2} className="empty-state">
+                      Loading…
+                    </td>
+                  </tr>
+                ) : ipStats.requests_by_ip.length === 0 ? (
+                  <tr>
+                    <td colSpan={2} className="empty-state">
+                      No requests yet
+                    </td>
+                  </tr>
+                ) : (
+                  ipStats.requests_by_ip.map((row) => (
+                    <tr key={row.ip}>
+                      <td className="mono" style={{ color: "var(--text-primary)" }}>
+                        {row.ip}
+                      </td>
+                      <td className="num">{row.count.toLocaleString()}</td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </motion.div>
+        </div>
+      </section>
+
+      <section className="section">
+        <h2 className="section-title">Recent requests (last 50)</h2>
+        <motion.div
+          className="table-wrap"
+          initial={{ opacity: 0, y: 16 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.3, duration: 0.35 }}
+        >
+          <table>
+            <thead>
+              <tr>
+                <th>Path</th>
+                <th>Latency</th>
+                <th>Bytes</th>
+                <th>Status</th>
+                <th>Method</th>
+                <th>RPS</th>
+                <th>CPU %</th>
+                <th>Memory</th>
+                <th>Conns</th>
+                <th>Uptime</th>
+              </tr>
+            </thead>
+            <tbody>
+              {requests.length === 0 ? (
+                <tr>
+                  <td colSpan={10} className="empty-state">
+                    Waiting for live metrics…
+                  </td>
+                </tr>
+              ) : (
+                requests.map((r, idx) => (
+                  <motion.tr
+                    key={`${r.path}-${r.latency_ms}-${idx}`}
+                    initial={{ opacity: 0, x: -8 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    transition={{ duration: 0.25 }}
+                  >
+                    <td className="mono" style={{ color: "var(--text-primary)" }}>
+                      {r.path}
+                    </td>
+                    <td className={`num ${latencyClass(r.latency_ms)}`}>
+                      {r.latency_ms} ms
+                    </td>
+                    <td className="num">{formatBytes(r.bytes)}</td>
+                    <td className="num">{r.status_code}</td>
+                    <td className="mono">{r.method}</td>
+                    <td className="num">{r.request_rate.toFixed(2)}</td>
+                    <td className="num">{r.cpu_usage_percent.toFixed(2)}</td>
+                    <td className="num">{formatBytes(r.memory_usage_bytes)}</td>
+                    <td className="num">{r.active_connections}</td>
+                    <td className="num">{r.uptime_seconds}s</td>
+                  </motion.tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </motion.div>
+      </section>
+    </motion.div>
   );
 }
 

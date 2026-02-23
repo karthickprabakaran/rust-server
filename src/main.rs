@@ -10,6 +10,7 @@ use std::{
 
 use anyhow::Result;
 use dashmap::{DashMap, DashSet};
+use governor::clock::Clock;
 use governor::{Quota, RateLimiter};
 use futures::{SinkExt, StreamExt};
 use hyper::{
@@ -21,7 +22,7 @@ use lru::LruCache;
 use std::num::NonZeroU32;
 use once_cell::sync::OnceCell;
 use serde::Serialize;
-use sysinfo::{System, RefreshKind};
+use sysinfo::System;
 use tokio::{
     net::TcpListener,
     sync::{broadcast, Mutex},
@@ -38,6 +39,9 @@ static START_TIME: OnceCell<Instant> = OnceCell::new();
 
 // Track active connections for WebSocket
 static WS_CLIENTS_COUNT: OnceCell<Mutex<usize>> = OnceCell::new();
+
+// Per-IP request count (all requests, including blocked)
+static REQUEST_COUNT_BY_IP: OnceCell<DashMap<IpAddr, u64>> = OnceCell::new();
 
 #[derive(Serialize, Clone, Debug)]
 struct RequestMetrics {
@@ -64,6 +68,18 @@ struct Summary {
     cache_hits: u64,
     cache_misses: u64,
     error_count: u64,
+}
+
+#[derive(Serialize)]
+struct IpRequestCount {
+    ip: String,
+    count: u64,
+}
+
+#[derive(Serialize)]
+struct IpStatsResponse {
+    blocked_ips: Vec<String>,
+    requests_by_ip: Vec<IpRequestCount>,
 }
 
 type KeyedLimiter = governor::DefaultKeyedRateLimiter<IpAddr>;
@@ -155,11 +171,29 @@ fn compute_summary() -> Summary {
     }
 }
 
+fn cors_headers() -> [(&'static str, &'static str); 2] {
+    [
+        ("Access-Control-Allow-Origin", "*"),
+        ("Access-Control-Allow-Methods", "GET, OPTIONS"),
+    ]
+}
+
 async fn handle(
     req: Request<Body>,
     blacklist: Arc<DashSet<IpAddr>>,
     rate_limiter: Arc<KeyedLimiter>,
 ) -> Result<Response<Body>, Infallible> {
+    let path = req.uri().path().to_string();
+
+    // CORS preflight
+    if req.method().as_str() == "OPTIONS" {
+        let mut res = Response::builder().status(StatusCode::NO_CONTENT);
+        for (k, v) in cors_headers() {
+            res = res.header(k, v);
+        }
+        return Ok(res.body(Body::empty()).unwrap());
+    }
+
     let client_ip = req
         .extensions()
         .get::<SocketAddr>()
@@ -174,6 +208,39 @@ async fn handle(
         Ok(ip) => ip,
         Err(res) => return Ok(res),
     };
+
+    // Count request per IP (all requests)
+    REQUEST_COUNT_BY_IP
+        .get()
+        .unwrap()
+        .entry(client_ip)
+        .and_modify(|c| *c += 1)
+        .or_insert(1);
+
+    // Return IP stats API (blocked list + requests by IP)
+    if path == "/api/ip-stats" {
+        let blocked_ips: Vec<String> = blacklist.iter().map(|ip| ip.to_string()).collect();
+        let mut requests_by_ip: Vec<IpRequestCount> = REQUEST_COUNT_BY_IP
+            .get()
+            .unwrap()
+            .iter()
+            .map(|r| IpRequestCount {
+                ip: r.key().to_string(),
+                count: *r.value(),
+            })
+            .collect();
+        requests_by_ip.sort_by(|a, b| b.count.cmp(&a.count));
+        let body = serde_json::to_string(&IpStatsResponse {
+            blocked_ips,
+            requests_by_ip,
+        })
+        .unwrap();
+        let mut b = Response::builder().status(StatusCode::OK).header("Content-Type", "application/json");
+        for (k, v) in cors_headers() {
+            b = b.header(k, v);
+        }
+        return Ok(b.body(Body::from(body)).unwrap());
+    }
 
     if blacklist.contains(&client_ip) {
         METRICS
@@ -199,7 +266,6 @@ async fn handle(
         return Ok(response_429(wait_secs));
     }
 
-    let path = req.uri().path().to_string();
     let method = req.method().to_string();
 
     // Return summary if requested
@@ -292,6 +358,7 @@ async fn main() -> Result<()> {
     METRICS.set(DashMap::new()).unwrap();
     REQUEST_METRICS.set(Mutex::new(Vec::new())).unwrap();
     WS_CLIENTS_COUNT.set(Mutex::new(0)).unwrap();
+    REQUEST_COUNT_BY_IP.set(DashMap::new()).unwrap();
 
     let blacklist = Arc::new(load_blacklist());
     let rate_limiter = Arc::new(create_rate_limiter());
