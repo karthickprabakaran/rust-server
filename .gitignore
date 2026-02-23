@@ -1,0 +1,10 @@
+# Rust
+/target/
+**/target/
+
+# IDE / OS
+.idea
+.vscode/
+.DS_Store
+*.swp
+*.swo
