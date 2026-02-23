@@ -1,1 +1,1 @@
-/Users/karthick/projects/Rust/Server/target/debug/Server: /Users/karthick/projects/Rust/Server/src/main.rs
+/Users/karthick/projects/Rust/rust-server/target/debug/Server: /Users/karthick/projects/Rust/rust-server/src/main.rs
